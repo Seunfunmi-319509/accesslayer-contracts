@@ -509,6 +509,7 @@ pub struct PriceQueriedEvent {
 /// Shared price-oracle read event topics tuple.
 pub fn price_queried_topics(caller: &Address) -> (Symbol, Address) {
     (PRICE_QUERIED_EVENT_NAME, caller.clone())
+}
 
 // --- Supply cap events ---
 
