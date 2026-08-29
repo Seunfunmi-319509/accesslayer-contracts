@@ -16,6 +16,7 @@ fn setup_test() -> (Env, CreatorKeysContractClient<'static>, Address, Address) {
     client.set_treasury_address(&admin, &treasury);
     client.set_key_price(&admin, &100i128);
     client.set_fee_config(&admin, &9000u32, &1000u32);
+
     (env, client, admin, treasury)
 }
 
@@ -39,9 +40,8 @@ fn test_circuit_breaker_threshold_configuration_and_trigger() {
     let (env, client, admin, _treasury) = setup_test();
     let creator = Address::generate(&env);
     register_creator(&env, &client, &creator);
-    client.set_circuit_breaker_threshold(&admin, &30u32);
 
-    // A configured threshold of 30% rejects a 100% first-step increase.
+    // Default threshold is 30%.
     // Buy 1: supply 0 -> 1. Price moves from base_price (100) to 200 (100% increase > 30%).
     let buyer = Address::generate(&env);
     let result = client.try_buy_key(&creator, &buyer, &1000i128, &None);
@@ -63,6 +63,7 @@ fn test_referral_system_fee_split_and_validation() {
 
     // Set high threshold so buy doesn't trigger circuit breaker
     client.set_circuit_breaker_threshold(&admin, &500u32);
+
     let buyer = Address::generate(&env);
     let referrer = Address::generate(&env);
 
@@ -92,12 +93,12 @@ fn test_referral_system_fee_split_and_validation() {
     let ref_earnings = client.get_referral_earnings(&referrer);
     assert_eq!(ref_earnings, 5);
 
-    // Buy without referrer sends the full protocol fee for the next curve price.
+    // Buy without referrer sends full protocol fee (20) to treasury (price at supply 1 is 200, 10% = 20)
     let buyer2 = Address::generate(&env);
     let treasury_bal_before2 = client.get_treasury_balance();
     client.buy_key(&creator, &buyer2, &1000i128, &None);
     let treasury_bal_after2 = client.get_treasury_balance();
-    assert_eq!(treasury_bal_after2 - treasury_bal_before2, 10);
+    assert_eq!(treasury_bal_after2 - treasury_bal_before2, 20);
 }
 
 #[test]

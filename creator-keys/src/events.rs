@@ -811,27 +811,6 @@ pub fn auction_purchase_topics(creator: &Address, buyer: &Address) -> (Symbol, A
     (AUCTION_PURCHASE_EVENT_NAME, creator.clone(), buyer.clone())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[contracttype]
-pub struct StakeRewardClaimedEvent {
-    pub wallet: Address,
-    pub key_id: Address,
-    pub quantity_unlocked: u32,
-    pub reward_amount: i128,
-    pub ledger: u32,
-}
-
-pub fn stake_reward_claimed_topics(
-    creator: &Address,
-    wallet: &Address,
-) -> (Symbol, Address, Address) {
-    (
-        STAKE_REWARD_CLAIMED_EVENT_NAME,
-        creator.clone(),
-        wallet.clone(),
-    )
-}
-
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -1128,15 +1107,6 @@ pub fn royalty_updated_topics(creator: &Address) -> (Symbol, Address) {
     (ROYALTY_UPDATED_EVENT_NAME, creator.clone())
 }
 
-/// Event name for protocol trade fee collected.
-pub const FEE_COLLECTED_EVENT_NAME: Symbol = symbol_short!("fee_col");
-
-/// Stable fee collected event payload for downstream indexers.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[contracttype]
-pub struct FeeCollectedEvent {
-    pub treasury: Address,
-    pub amount: i128,
 /// Event name for the protocol trade fee collected on a buy or sell.
 pub const FEE_COLLECTED_EVENT_NAME: Symbol = symbol_short!("fee_coll");
 
@@ -1167,17 +1137,6 @@ pub fn fee_collected_topics(treasury: &Address) -> (Symbol, Address) {
     (FEE_COLLECTED_EVENT_NAME, treasury.clone())
 }
 
-/// Event name for a sell blocked by an active anti-flash-trade lockup.
-pub const LOCKUP_BLOCKED_EVENT_NAME: Symbol = symbol_short!("lck_blk");
-
-/// Stable lockup blocked event payload for downstream indexers.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[contracttype]
-pub struct LockupBlockedEvent {
-    pub creator_id: Address,
-    pub seller: Address,
-    pub last_buy_timestamp: u64,
-    pub unlock_at: u64,
 /// Stable lockup-blocked event payload for downstream indexers.
 ///
 /// Event shape:
@@ -1239,7 +1198,11 @@ pub struct StakeEvent {
 }
 
 /// Shared stake event topics tuple.
-pub fn stake_topics(creator: &Address, holder: &Address, stake_id: u32) -> (Symbol, Address, Address, u32) {
+pub fn stake_topics(
+    creator: &Address,
+    holder: &Address,
+    stake_id: u32,
+) -> (Symbol, Address, Address, u32) {
     (STAKE_EVENT_NAME, creator.clone(), holder.clone(), stake_id)
 }
 
@@ -1269,7 +1232,12 @@ pub fn stake_extended_topics(
     holder: &Address,
     stake_id: u32,
 ) -> (Symbol, Address, Address, u32) {
-    (STAKE_EXTENDED_EVENT_NAME, creator.clone(), holder.clone(), stake_id)
+    (
+        STAKE_EXTENDED_EVENT_NAME,
+        creator.clone(),
+        holder.clone(),
+        stake_id,
+    )
 }
 
 /// Stable early-unstake event payload for downstream indexers.
@@ -1302,7 +1270,12 @@ pub fn early_unstake_topics(
     holder: &Address,
     stake_id: u32,
 ) -> (Symbol, Address, Address, u32) {
-    (EARLY_UNSTAKE_EVENT_NAME, creator.clone(), holder.clone(), stake_id)
+    (
+        EARLY_UNSTAKE_EVENT_NAME,
+        creator.clone(),
+        holder.clone(),
+        stake_id,
+    )
 }
 
 /// Stable stake-reward-claim event payload for downstream indexers.
@@ -1335,5 +1308,10 @@ pub fn stake_reward_claimed_topics(
     holder: &Address,
     stake_id: u32,
 ) -> (Symbol, Address, Address, u32) {
-    (STAKE_REWARD_CLAIMED_EVENT_NAME, creator.clone(), holder.clone(), stake_id)
+    (
+        STAKE_REWARD_CLAIMED_EVENT_NAME,
+        creator.clone(),
+        holder.clone(),
+        stake_id,
+    )
 }
