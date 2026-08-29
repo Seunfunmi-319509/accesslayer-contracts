@@ -7,7 +7,7 @@ use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, 
 pub mod events;
 pub mod test_new_features;
 
-#[contracterror]
+#[contracterror(export = false)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 /// Contract error variants.
@@ -2090,7 +2090,7 @@ impl CreatorKeysContract {
     /// Parameter validation:
     /// - `creator`: must authorize the call (`require_auth`). A profile must not
     ///   already exist for this address, otherwise
-    ///   [`ContractError::CapAlreadySet`].
+    ///   [`ContractError::AlreadyRegistered`].
     /// - `handle`: validated by [`validate_creator_handle`] — a blank handle
     ///   (empty or whitespace-only) returns [`ContractError::DisplayNameEmpty`],
     ///   below the minimum length returns [`ContractError::HandleTooShort`],
@@ -2131,7 +2131,7 @@ impl CreatorKeysContract {
         // Creator profile storage is a single source of truth keyed by creator address.
         // Once written, this key's existence is the registration invariant.
         if env.storage().persistent().has(&key) {
-            return Err(ContractError::CapAlreadySet);
+            return Err(ContractError::AlreadyRegistered);
         }
 
         let current_ledger = env.ledger().sequence();

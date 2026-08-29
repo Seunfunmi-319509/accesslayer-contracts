@@ -67,7 +67,9 @@ fn test_sell_within_lockup_is_rejected_and_emits_event() {
     let result = s.client.try_sell_key(&s.creator, &trader, &None);
     assert_eq!(
         result,
-        Ok(Err(ContractError::LockupPeriodActive)),
+        Err(Err(soroban_sdk::InvokeError::Contract(
+            ContractError::LockupPeriodActive as u32
+        ))),
         "a sell inside the 24h lockup must be rejected"
     );
 
@@ -127,7 +129,12 @@ fn test_last_buy_timestamp_is_updated_on_every_buy() {
     // the sell must stay blocked because last_buy_timestamp was refreshed.
     set_test_timestamp(&env, second_buy_ts + LOCKUP_SECS - 1);
     let result = s.client.try_sell_key(&s.creator, &trader, &None);
-    assert_eq!(result, Ok(Err(ContractError::LockupPeriodActive)));
+    assert_eq!(
+        result,
+        Err(Err(soroban_sdk::InvokeError::Contract(
+            ContractError::LockupPeriodActive as u32
+        )))
+    );
 
     // Once the refreshed window has elapsed the sell goes through.
     set_test_timestamp(&env, second_buy_ts + LOCKUP_SECS);
@@ -165,7 +172,12 @@ fn test_non_admin_cannot_configure_the_lockup() {
 
     let impostor = Address::generate(&env);
     let result = s.client.try_set_lockup_duration(&impostor, &LOCKUP_SECS);
-    assert_eq!(result, Ok(Err(ContractError::Unauthorized)));
+    assert_eq!(
+        result,
+        Err(Err(soroban_sdk::InvokeError::Contract(
+            ContractError::Unauthorized as u32
+        )))
+    );
 }
 
 #[test]
@@ -174,7 +186,12 @@ fn test_zero_duration_is_rejected() {
     let s = setup_with_lockup(&env);
 
     let result = s.client.try_set_lockup_duration(&s.admin, &0);
-    assert_eq!(result, Ok(Err(ContractError::NotPositiveAmount)));
+    assert_eq!(
+        result,
+        Err(Err(soroban_sdk::InvokeError::Contract(
+            ContractError::NotPositiveAmount as u32
+        )))
+    );
 }
 
 #[test]

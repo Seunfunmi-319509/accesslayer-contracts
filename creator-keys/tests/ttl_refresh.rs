@@ -158,5 +158,10 @@ fn test_refresh_ttl_rejects_non_admin_callers() {
     let creators = Vec::new(&env);
 
     let result = client.try_refresh_ttl(&impostor, &creators);
-    assert_eq!(result, Ok(Err(ContractError::Unauthorized)));
+    assert_eq!(
+        result,
+        Err(Err(soroban_sdk::InvokeError::Contract(
+            ContractError::Unauthorized as u32
+        )))
+    );
 }

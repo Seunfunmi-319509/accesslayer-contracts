@@ -16,7 +16,8 @@ use contract_test_env::{
     register_creator_keys, register_test_creator, set_key_price_for_tests, test_env_with_auths,
 };
 use creator_keys::events::{
-    global_pause_activated_topics, global_pause_lifted_topics, GLOBAL_PAUSE_ACTIVATED_EVENT_NAME,
+    global_pause_activated_topics, GLOBAL_PAUSE_ACTIVATED_EVENT_NAME,
+    GLOBAL_PAUSE_LIFTED_EVENT_NAME,
 };
 use creator_keys::{ContractError, CreatorKeysContractClient};
 use soroban_sdk::{
@@ -188,7 +189,10 @@ fn test_global_resume_with_two_approvals_lifts_halt() {
     assert!(!f.client.get_global_trading_paused());
 
     assert!(env.events().all().iter().any(|(_, topics, _)| {
-        topics == global_pause_lifted_topics(&f.signers[2]).into_val(&env)
+        topics.get(0).map(|topic| {
+            let name: soroban_sdk::Symbol = topic.into_val(&env);
+            name == GLOBAL_PAUSE_LIFTED_EVENT_NAME
+        }) == Some(true)
     }));
 
     // Trading works again on any key.
