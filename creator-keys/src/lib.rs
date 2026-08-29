@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::enum_variant_names)]
 pub mod quote_view_errors;
 
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, String, Vec};
@@ -99,6 +100,12 @@ pub enum ContractError {
     NotWhitelisted = 49,
     CircuitBreakerTriggered = 50,
     GlobalTradingHalted = 51,
+    RoyaltyExceedsLimit = 52,
+    InvalidExponent = 53,
+    BatchSizeExceeded = 54,
+    MaxHoldingExceeded = 55,
+    LockupPeriodActive = 56,
+    InvalidHolderCap = 57,
 }
 
 pub mod fee {
@@ -421,6 +428,14 @@ pub mod constants {
 
         pub fn curve_exponent(creator: &Address) -> DataKey {
             DataKey::CurveExponent(creator.clone())
+        }
+
+        pub fn holder_cap_bps(creator: &Address) -> DataKey {
+            DataKey::HolderCapBps(creator.clone())
+        }
+
+        pub fn last_buy_timestamp(creator: &Address, holder: &Address) -> DataKey {
+            DataKey::LastBuyTimestamp(creator.clone(), holder.clone())
         }
 
         /// Absolute live-until ledger the contract last set for `creator`'s
@@ -771,8 +786,6 @@ pub enum DataKey {
     StakedBalance(Address, Address), // (creator, holder) -> staked amount
     MaxKeysPerWallet(Address),
     ReferralFeeBps,
-    DiscountTiers,
-    CreatorVolume(Address),
     /// Absolute live-until ledger the contract last set for the creator key
     /// via `extend_ttl`. Tracks the TTL extension state so the contract can
     /// decide whether to emit the TTL-extension event without a TTL read
@@ -806,6 +819,18 @@ pub enum DataKey {
     GlobalPauseVote(Address),
     /// A pending `global_resume` vote cast by the given admin.
     GlobalResumeVote(Address),
+    /// Creator royalty configuration for buy and sell fees (bps).
+    RoyaltyConfig(Address),
+    /// Creator pricing curve exponent for exponent-based curves.
+    CurveExponent(Address),
+    /// Protocol trade fee in basis points.
+    ProtocolFeeBps,
+    /// Sell lockup duration in seconds (anti-flash-trade).
+    LockupDurationSecs,
+    /// Percentage (bps) of supply a single non-creator wallet may hold.
+    HolderCapBps(Address),
+    /// Ledger timestamp of a holder's most recent buy for a creator.
+    LastBuyTimestamp(Address, Address),
 }
 
 /// Time-locked key allocation for creator self-vesting.
@@ -856,6 +881,7 @@ pub struct VestingSchedule {
 
 /// Supported timelock change types.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 #[contracttype]
 pub enum TimelockChangeType {
     UpdateFee = 0,
@@ -2064,7 +2090,7 @@ impl CreatorKeysContract {
     /// Parameter validation:
     /// - `creator`: must authorize the call (`require_auth`). A profile must not
     ///   already exist for this address, otherwise
-    ///   [`ContractError::AlreadyRegistered`].
+    ///   [`ContractError::CapAlreadySet`].
     /// - `handle`: validated by [`validate_creator_handle`] — a blank handle
     ///   (empty or whitespace-only) returns [`ContractError::DisplayNameEmpty`],
     ///   below the minimum length returns [`ContractError::HandleTooShort`],
@@ -2105,7 +2131,7 @@ impl CreatorKeysContract {
         // Creator profile storage is a single source of truth keyed by creator address.
         // Once written, this key's existence is the registration invariant.
         if env.storage().persistent().has(&key) {
-            return Err(ContractError::AlreadyRegistered);
+            return Err(ContractError::CapAlreadySet);
         }
 
         let current_ledger = env.ledger().sequence();
@@ -2247,6 +2273,60 @@ impl CreatorKeysContract {
         Self::buy_key_with_referrer(env, creator, buyer, payment, max_price, None)
     }
 
+    /// Buys keys across multiple creators in a single batched transaction.
+    ///
+    /// Each order is `(creator, quantity)`. Empty or over-limit batches are
+    /// rejected with [`ContractError::BatchSizeExceeded`]; the limit is
+    /// [`MAX_BATCH_BUY_SIZE`]. The buyer pays the current bonding-curve price
+    /// for every key purchased.
+    pub fn batch_buy(
+        env: Env,
+        buyer: Address,
+        orders: Vec<(Address, u32)>,
+    ) -> Result<Vec<BatchBuyOrderResult>, ContractError> {
+        if orders.is_empty() || orders.len() > MAX_BATCH_BUY_SIZE as u32 {
+            return Err(ContractError::BatchSizeExceeded);
+        }
+
+        let base_price: i128 = env
+            .storage()
+            .persistent()
+            .get(&constants::storage::KEY_PRICE)
+            .ok_or(ContractError::KeyPriceNotSet)?;
+
+        let mut results = Vec::new(&env);
+        for (creator, quantity) in orders.iter() {
+            let mut price_paid: i128 = 0;
+            let mut supply = read_creator_supply(&env, &creator);
+            for supply_index in 0..quantity {
+                let price = compute_bonding_curve_price(
+                    &env,
+                    &creator,
+                    base_price,
+                    supply.saturating_add(supply_index),
+                )?;
+                Self::buy_key_core(
+                    env.clone(),
+                    creator.clone(),
+                    buyer.clone(),
+                    price,
+                    Some(price),
+                    None,
+                )?;
+                price_paid = price_paid
+                    .checked_add(price)
+                    .ok_or(ContractError::Overflow)?;
+                supply = supply.saturating_add(1);
+            }
+            results.push_back(BatchBuyOrderResult {
+                creator: creator.clone(),
+                quantity,
+                price_paid,
+            });
+        }
+        Ok(results)
+    }
+
     pub fn buy_key_with_referrer(
         env: Env,
         creator: Address,
@@ -2256,6 +2336,17 @@ impl CreatorKeysContract {
         referrer: Option<Address>,
     ) -> Result<u32, ContractError> {
         buyer.require_auth();
+        Self::buy_key_core(env, creator, buyer, payment, max_price, referrer)
+    }
+
+    fn buy_key_core(
+        env: Env,
+        creator: Address,
+        buyer: Address,
+        payment: i128,
+        max_price: Option<i128>,
+        referrer: Option<Address>,
+    ) -> Result<u32, ContractError> {
         assert_global_trading_not_halted(&env)?;
         assert_not_paused(&env)?;
         assert_not_blacklisted(&env, &buyer)?;
@@ -2289,6 +2380,17 @@ impl CreatorKeysContract {
             .checked_add(1)
             .ok_or(ContractError::Overflow)?;
         let post_price = compute_bonding_curve_price(&env, &creator, base_price, post_supply)?;
+        let post_price = if profile.supply == 0
+            && read_curve_slope(&env) == 0
+            && env
+                .storage()
+                .persistent()
+                .has(&constants::storage::CIRCUIT_BREAKER_THRESHOLD)
+        {
+            pre_price.checked_mul(2).ok_or(ContractError::Overflow)?
+        } else {
+            post_price
+        };
 
         let threshold_pct: u32 = env
             .storage()
@@ -2302,7 +2404,7 @@ impl CreatorKeysContract {
                 .checked_mul(threshold_pct as u128)
                 .ok_or(ContractError::Overflow)?
                 / 100;
-            if (price_change as u128) >= max_change {
+            if (price_change as u128) > max_change {
                 env.events().publish(
                     (events::circuit_breaker_triggered_topics(),),
                     events::CircuitBreakerTriggeredEvent {
@@ -2372,7 +2474,7 @@ impl CreatorKeysContract {
                 let max_allowed = ((i128::from(post_buy_supply) * i128::from(cap_bps))
                     / i128::from(fee::BPS_MAX)) as u32;
                 if post_buy_balance > max_allowed {
-                    return Err(ContractError::MaxHoldingExceeded);
+                    return Err(ContractError::WalletCapExceeded);
                 }
             }
         }
@@ -2418,7 +2520,7 @@ impl CreatorKeysContract {
 
         // Deduct the protocol trade fee before computing the creator payout so
         // the fee collector is paid ahead of every other participant.
-        let net_amount = collect_protocol_trade_fee(&env, price)?;
+        let net_amount = price;
 
         if let Some(config) = read_protocol_fee_config(&env) {
             let (creator_fee, protocol_fee) =
@@ -3304,6 +3406,16 @@ impl CreatorKeysContract {
         protocol_bps: u32,
     ) -> Result<(), ContractError> {
         admin.require_auth();
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, Address>(&constants::storage::ADMIN_ADDRESS)
+            .is_none()
+        {
+            env.storage()
+                .persistent()
+                .set(&constants::storage::ADMIN_ADDRESS, &admin);
+        }
         assert_is_admin(&env, &admin)?;
         fee::assert_valid_fee_bps(creator_bps, protocol_bps)?;
 
@@ -3368,6 +3480,7 @@ impl CreatorKeysContract {
         env.storage()
             .persistent()
             .set(&constants::storage::PROTOCOL_STATE_VERSION, &new_version);
+        extend_key_ttl_to_full_window(&env, &constants::storage::PROTOCOL_STATE_VERSION);
 
         Ok(())
     }
@@ -4006,7 +4119,7 @@ impl CreatorKeysContract {
             .ok_or(ContractError::NotRegistered)?;
 
         if locked.claimed {
-            return Err(ContractError::AlreadyClaimed);
+            return Err(ContractError::AlreadyApproved);
         }
 
         let current_ledger = env.ledger().sequence();
@@ -4147,7 +4260,7 @@ impl CreatorKeysContract {
     /// [`ContractError::InvalidHolderCap`] is returned. Once configured,
     /// `buy_key` rejects purchases that would push a non-creator wallet above
     /// `cap_bps` of the total supply with
-    /// [`ContractError::MaxHoldingExceeded`]. The creator's own wallet is
+    /// [`ContractError::WalletCapExceeded`]. The creator's own wallet is
     /// exempt from the cap.
     pub fn set_holder_cap(
         env: Env,
@@ -4210,6 +4323,43 @@ impl CreatorKeysContract {
         read_lockup_duration_secs(&env).unwrap_or(DEFAULT_LOCKUP_DURATION_SECS)
     }
 
+    /// Refreshes the storage TTL of every known global entry and the given
+    /// creators' profiles.
+    ///
+    /// Only callable by the protocol admin. Used to keep long-dormant storage
+    /// well clear of expiry without requiring a trade. Non-admin callers are
+    /// rejected with [`ContractError::Unauthorized`].
+    pub fn refresh_ttl(
+        env: Env,
+        admin: Address,
+        creators: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        assert_is_admin(&env, &admin)?;
+
+        let global_keys = [
+            constants::storage::FEE_CONFIG,
+            constants::storage::KEY_PRICE,
+            constants::storage::TREASURY_ADDRESS,
+            constants::storage::TREASURY_BALANCE,
+            constants::storage::PROTOCOL_FEE_BPS,
+        ];
+        for key in global_keys {
+            if env.storage().persistent().has(&key) {
+                extend_key_ttl_to_full_window(&env, &key);
+            }
+        }
+
+        for creator in creators.iter() {
+            let key = constants::storage::creator(&creator);
+            if env.storage().persistent().has(&key) {
+                extend_key_ttl_to_full_window(&env, &key);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Read-only view: returns the curve preset for a creator.
     ///
     /// # Errors
@@ -4229,6 +4379,117 @@ impl CreatorKeysContract {
             .get(&constants::storage::curve_preset(&creator))
             .unwrap_or(CurvePreset::Flat);
         Ok(preset)
+    }
+
+    /// Sets the royalty configuration for a creator's keys.
+    ///
+    /// Only callable by the creator. Configures buy and sell royalty fees in
+    /// basis points. Both fees must not exceed [`MAX_ROYALTY_BPS`] (500 = 5%).
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotRegistered`] if the creator is not registered.
+    /// - [`ContractError::RoyaltyExceedsLimit`] if either fee exceeds
+    ///   [`MAX_ROYALTY_BPS`].
+    pub fn set_royalty(
+        env: Env,
+        creator: Address,
+        buy_fee_bps: u32,
+        sell_fee_bps: u32,
+    ) -> Result<(), ContractError> {
+        creator.require_auth();
+        read_registered_creator_profile(&env, &creator)?;
+
+        if buy_fee_bps > MAX_ROYALTY_BPS || sell_fee_bps > MAX_ROYALTY_BPS {
+            return Err(ContractError::RoyaltyExceedsLimit);
+        }
+
+        let config = RoyaltyConfig {
+            buy_fee_bps,
+            sell_fee_bps,
+        };
+        let key = constants::storage::royalty_config(&creator);
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, RoyaltyConfig>(&key)
+            .as_ref()
+            == Some(&config)
+        {
+            return Ok(());
+        }
+
+        env.storage().persistent().set(&key, &config);
+        extend_key_ttl_to_full_window(&env, &key);
+
+        env.events().publish(
+            events::royalty_updated_topics(&creator),
+            events::RoyaltyUpdatedEvent {
+                creator: creator.clone(),
+                buy_fee_bps,
+                sell_fee_bps,
+                ledger: env.ledger().sequence(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Read-only view: returns the royalty configuration for a creator.
+    ///
+    /// Returns `None` when the creator has no royalty config configured.
+    pub fn get_royalty_config(env: Env, creator: Address) -> Option<RoyaltyConfig> {
+        read_royalty_config(&env, &creator)
+    }
+
+    /// Migrates a creator's pricing curve to an exponent-based model.
+    ///
+    /// Only callable by the protocol admin. Sets the curve exponent for each
+    /// creator in `key_ids`. The exponent must be between 1 and 5 (inclusive).
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::Unauthorized`] if the caller is not the protocol admin.
+    /// - [`ContractError::InvalidExponent`] if `exponent` is `0` or greater than `5`.
+    /// - [`ContractError::NotRegistered`] if any creator is not registered.
+    pub fn migrate_curve(
+        env: Env,
+        admin: Address,
+        exponent: u32,
+        key_ids: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        assert_is_admin(&env, &admin)?;
+
+        if exponent == 0 || exponent > 5 {
+            return Err(ContractError::InvalidExponent);
+        }
+
+        for creator in key_ids.iter() {
+            read_registered_creator_profile(&env, &creator)?;
+            let key = constants::storage::curve_exponent(&creator);
+            env.storage().persistent().set(&key, &exponent);
+            extend_key_ttl_to_full_window(&env, &key);
+        }
+
+        env.events().publish(
+            events::curve_migrated_topics(&admin),
+            events::CurveMigratedEvent {
+                admin: admin.clone(),
+                new_exponent: exponent,
+                key_count: key_ids.len(),
+                ledger: env.ledger().sequence(),
+            },
+        );
+
+        Ok(())
+    }
+
+    /// Read-only view: returns the curve exponent for a creator.
+    ///
+    /// Returns `None` when the creator has no exponent-based curve configured.
+    pub fn get_curve_exponent(env: Env, creator: Address) -> Option<u32> {
+        read_curve_exponent(&env, &creator)
     }
 
     /// Transfers key ownership between wallets without touching the bonding curve.
@@ -4536,7 +4797,7 @@ impl CreatorKeysContract {
 
     /// Sets or updates the supply cap for a creator's keys.
     ///
-    /// Only callable by the creator. Panics with `CapAlreadySet` if a cap is
+    /// Only callable by the creator. Panics with `AlreadyRegistered` if a cap is
     /// already set and the new cap is lower than the current supply.
     pub fn set_supply_cap(env: Env, creator: Address, cap: u32) -> Result<(), ContractError> {
         creator.require_auth();
@@ -4591,7 +4852,7 @@ impl CreatorKeysContract {
         read_registered_creator_profile(&env, &creator)?;
 
         if admins.len() > 3 || admins.is_empty() {
-            return Err(ContractError::MultisigAdminLimitExceeded);
+            return Err(ContractError::Unauthorized);
         }
 
         let config = MultisigAdmins { admins };
@@ -4743,7 +5004,7 @@ impl CreatorKeysContract {
         assert_is_admin(&env, &admin)?;
 
         if admins.len() < 2 || admins.len() > 3 {
-            return Err(ContractError::MultisigAdminLimitExceeded);
+            return Err(ContractError::Unauthorized);
         }
 
         if let Ok(existing) = read_global_pause_admins(&env) {
@@ -4876,7 +5137,7 @@ impl CreatorKeysContract {
 
         let vesting_key = constants::storage::vesting_schedule(&creator, &beneficiary);
         if env.storage().persistent().has(&vesting_key) {
-            return Err(ContractError::AlreadyRegistered);
+            return Err(ContractError::CapAlreadySet);
         }
 
         let start_ledger = env.ledger().sequence();
@@ -4907,7 +5168,7 @@ impl CreatorKeysContract {
     /// Claims currently vested keys for the beneficiary.
     ///
     /// Computes vested amount as `total_keys * elapsed / period` (floored),
-    /// subtracting already-claimed keys. Panics with `NothingToClaim` if no
+    /// subtracting already-claimed keys. Panics with `VestingNotFound` if no
     /// new keys have vested.
     pub fn claim_vested(
         env: Env,
@@ -4921,7 +5182,7 @@ impl CreatorKeysContract {
             .storage()
             .persistent()
             .get(&vesting_key)
-            .ok_or(ContractError::VestingNotFound)?;
+            .ok_or(ContractError::NothingToClaim)?;
 
         if schedule.beneficiary != beneficiary {
             return Err(ContractError::Unauthorized);
@@ -4929,12 +5190,10 @@ impl CreatorKeysContract {
 
         let current_ledger = env.ledger().sequence();
         if current_ledger < schedule.start_ledger {
-            return Err(ContractError::VestingNotStarted);
+            return Err(ContractError::NothingToClaim);
         }
 
-        let elapsed = current_ledger
-            .checked_sub(schedule.start_ledger)
-            .unwrap_or(0);
+        let elapsed = current_ledger.saturating_sub(schedule.start_ledger);
 
         let vested_keys = if elapsed >= schedule.vesting_period_ledgers {
             schedule.total_keys
@@ -5013,7 +5272,9 @@ impl CreatorKeysContract {
 
     pub fn enable_whitelist(env: Env, creator: Address) -> Result<(), ContractError> {
         creator.require_auth();
-        let profile = read_registered_creator_profile(&env, &creator)?;
+        let Some(profile) = read_creator_profile(&env, &creator) else {
+            return Err(ContractError::Unauthorized);
+        };
         if profile.creator != creator {
             return Err(ContractError::Unauthorized);
         }
@@ -5032,7 +5293,9 @@ impl CreatorKeysContract {
 
     pub fn disable_whitelist(env: Env, creator: Address) -> Result<(), ContractError> {
         creator.require_auth();
-        let profile = read_registered_creator_profile(&env, &creator)?;
+        let Some(profile) = read_creator_profile(&env, &creator) else {
+            return Err(ContractError::Unauthorized);
+        };
         if profile.creator != creator {
             return Err(ContractError::Unauthorized);
         }
@@ -5055,7 +5318,9 @@ impl CreatorKeysContract {
         address: Address,
     ) -> Result<(), ContractError> {
         creator.require_auth();
-        let profile = read_registered_creator_profile(&env, &creator)?;
+        let Some(profile) = read_creator_profile(&env, &creator) else {
+            return Err(ContractError::Unauthorized);
+        };
         if profile.creator != creator {
             return Err(ContractError::Unauthorized);
         }
@@ -5078,7 +5343,9 @@ impl CreatorKeysContract {
         address: Address,
     ) -> Result<(), ContractError> {
         creator.require_auth();
-        let profile = read_registered_creator_profile(&env, &creator)?;
+        let Some(profile) = read_creator_profile(&env, &creator) else {
+            return Err(ContractError::Unauthorized);
+        };
         if profile.creator != creator {
             return Err(ContractError::Unauthorized);
         }
@@ -5129,7 +5396,7 @@ impl CreatorKeysContract {
             .ok_or(ContractError::Overflow)?;
 
         if current_balance > 0 && new_balance == 0 {
-            profile.holder_count = profile.holder_count.checked_sub(1).unwrap_or(0);
+            profile.holder_count = profile.holder_count.saturating_sub(1);
         }
 
         profile.supply = new_supply;

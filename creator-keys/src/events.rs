@@ -1027,3 +1027,39 @@ pub struct RoyaltyUpdatedEvent {
 pub fn royalty_updated_topics(creator: &Address) -> (Symbol, Address) {
     (ROYALTY_UPDATED_EVENT_NAME, creator.clone())
 }
+
+/// Event name for protocol trade fee collected.
+pub const FEE_COLLECTED_EVENT_NAME: Symbol = symbol_short!("fee_col");
+
+/// Stable fee collected event payload for downstream indexers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct FeeCollectedEvent {
+    pub treasury: Address,
+    pub amount: i128,
+    pub ledger: u32,
+}
+
+/// Shared fee collected event topics tuple.
+pub fn fee_collected_topics(treasury: &Address) -> (Symbol, Address) {
+    (FEE_COLLECTED_EVENT_NAME, treasury.clone())
+}
+
+/// Event name for a sell blocked by an active anti-flash-trade lockup.
+pub const LOCKUP_BLOCKED_EVENT_NAME: Symbol = symbol_short!("lck_blk");
+
+/// Stable lockup blocked event payload for downstream indexers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct LockupBlockedEvent {
+    pub creator_id: Address,
+    pub seller: Address,
+    pub last_buy_timestamp: u64,
+    pub unlock_at: u64,
+    pub current_timestamp: u64,
+}
+
+/// Shared lockup blocked event topics tuple.
+pub fn lockup_blocked_topics(creator: &Address, seller: &Address) -> (Symbol, Address, Address) {
+    (LOCKUP_BLOCKED_EVENT_NAME, creator.clone(), seller.clone())
+}
