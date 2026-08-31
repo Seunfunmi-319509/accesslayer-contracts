@@ -1174,9 +1174,6 @@ pub const STAKE_EXTENDED_EVENT_NAME: Symbol = symbol_short!("stk_ext");
 /// Event name for an early (pre-maturity) unstake via `early_unstake`.
 pub const EARLY_UNSTAKE_EVENT_NAME: Symbol = symbol_short!("stk_chl");
 
-/// Event name for a reward claim at/after maturity via `claim_stake_reward`.
-pub const STAKE_REWARD_CLAIMED_EVENT_NAME: Symbol = symbol_short!("stk_clm");
-
 /// Stable stake event payload for downstream indexers.
 ///
 /// Event shape:

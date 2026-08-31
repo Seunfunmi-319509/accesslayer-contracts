@@ -109,12 +109,37 @@ pub enum ContractError {
     MultisigAdminLimitExceeded = 43,
     AlreadyApproved = 44,
     ProposalNotFound = 45,
-    VestingNotFound = 46,
-    NotWhitelisted = 49,
     CircuitBreakerTriggered = 50,
     MaxHoldingExceeded = 51,
     LockupPeriodActive = 52,
     InvalidHolderCap = 53,
+    GlobalTradingHalted = 54,
+    FreezeQuantityExceedsBalance = 55,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum WhitelistError {
+    NotWhitelisted = 1,
+    WhitelistOnly = 2,
+}
+
+impl From<WhitelistError> for ContractError {
+    fn from(_: WhitelistError) -> Self {
+        ContractError::Unauthorized
+    }
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VestingError {
+    Unauthorized = 1,
+    AllocationLocked = 2,
+    Overflow = 3,
+    AlreadyClaimed = 4,
+    VestingNotFound = 5,
 }
 
 /// Errors raised by the staking lifecycle entrypoints
@@ -397,6 +422,7 @@ pub mod constants {
 
     pub mod storage {
         use super::{creator_key, key_balance_key, DataKey};
+        use crate::GovernanceKey;
         use crate::StakingKey;
         use soroban_sdk::Address;
 
@@ -486,12 +512,12 @@ pub mod constants {
             DataKey::StakedBalance(creator.clone(), holder.clone())
         }
 
-        pub fn staking_position(creator: &Address, holder: &Address, stake_id: u32) -> DataKey {
-            DataKey::StakePosition(creator.clone(), holder.clone(), stake_id)
+        pub fn staking_position(creator: &Address, holder: &Address, stake_id: u32) -> StakingKey {
+            StakingKey::StakePosition(creator.clone(), holder.clone(), stake_id)
         }
 
-        pub fn staking_rewards_pool(creator: &Address) -> DataKey {
-            DataKey::StakingRewardsPool(creator.clone())
+        pub fn staking_rewards_pool(creator: &Address) -> StakingKey {
+            StakingKey::StakingRewardsPool(creator.clone())
         }
 
         pub fn next_stake_id(creator: &Address, holder: &Address) -> StakingKey {
@@ -544,7 +570,7 @@ pub mod constants {
             DataKey::VestingSchedule(creator.clone(), beneficiary.clone())
         }
 
-        pub const CIRCUIT_BREAKER_THRESHOLD: DataKey = DataKey::CircuitBreakerThreshold;
+        pub const CIRCUIT_BREAKER_THRESHOLD: GovernanceKey = GovernanceKey::CircuitBreakerThreshold;
 
         pub fn referral_earnings(referrer: &Address) -> DataKey {
             DataKey::ReferralEarnings(referrer.clone())
@@ -570,12 +596,12 @@ pub mod constants {
             DataKey::AuctionConfig(creator.clone())
         }
 
-        pub fn stake_unlock_ledger(creator: &Address, holder: &Address) -> DataKey {
-            DataKey::StakeUnlockLedger(creator.clone(), holder.clone())
+        pub fn stake_unlock_ledger(creator: &Address, holder: &Address) -> StakingKey {
+            StakingKey::StakeUnlockLedger(creator.clone(), holder.clone())
         }
 
-        pub fn total_staked(creator: &Address) -> DataKey {
-            DataKey::TotalStaked(creator.clone())
+        pub fn total_staked(creator: &Address) -> StakingKey {
+            StakingKey::TotalStaked(creator.clone())
         }
     }
 
@@ -883,8 +909,6 @@ pub enum DataKey {
     GlobalResumeVote(Address),
     SelfFrozenBalance(Address, Address),
     AuctionConfig(Address),
-    StakeUnlockLedger(Address, Address),
-    TotalStaked(Address),
     Creator(Address),
     FeeConfig,
     KeyPrice,
@@ -933,10 +957,6 @@ pub enum DataKey {
     PauseProposal(Address, Address),
     VestingSchedule(Address, Address),
     VestingClaimed(Address, Address),
-    TimelockProposal(u32),
-    TimelockNextId,
-    VoteSnapshot(Address, u32, Address),
-    CircuitBreakerThreshold,
     ReferralEarnings(Address),
     WhitelistMap(Address, Address),
     WhitelistMode(Address),
@@ -948,11 +968,6 @@ pub enum DataKey {
     HolderCapBps(Address),
     /// Timestamp of a holder's most recent buy for a creator (PR #774).
     LastBuyTimestamp(Address, Address),
-    /// Per-creator staking position. Keyed `(creator, holder, stake_id)`.
-    StakePosition(Address, Address, u32),
-    /// Per-creator staking rewards pool and cross-holder staked-key total,
-    /// funded by a share of protocol trade fees.
-    StakingRewardsPool(Address),
 }
 
 /// Internal staking account keys that are not part of the public data-key ABI.
@@ -964,6 +979,19 @@ pub enum DataKey {
 pub enum StakingKey {
     /// Next sequential stake id for a `(creator, holder)` pair -> `u32`.
     NextStakeId(Address, Address),
+    StakeUnlockLedger(Address, Address),
+    TotalStaked(Address),
+    StakePosition(Address, Address, u32),
+    StakingRewardsPool(Address),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum GovernanceKey {
+    TimelockProposal(u32),
+    TimelockNextId,
+    VoteSnapshot(Address, u32, Address),
+    CircuitBreakerThreshold,
 }
 
 /// A single locked staking position held by a holder.
@@ -976,6 +1004,15 @@ pub struct StakePosition {
     pub amount: u32,
     /// Ledger sequence at which the position matures and can be claimed.
     pub unlock_ledger: u32,
+}
+
+/// Per-creator prelaunch auction configuration.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct AuctionConfig {
+    pub auction_price: i128,
+    pub auction_supply: u32,
+    pub auction_sold: u32,
 }
 
 /// Per-creator staking rewards accounting.
@@ -1221,14 +1258,14 @@ fn assert_whitelist_allows_buy(
     env: &Env,
     profile: &CreatorProfile,
     buyer: &Address,
-) -> Result<(), ContractError> {
+) -> Result<(), WhitelistError> {
     let mode_key = constants::storage::whitelist_mode(&profile.creator);
     let is_mode_on: bool = env.storage().persistent().get(&mode_key).unwrap_or(false);
     if is_mode_on {
         let entry_key = constants::storage::whitelist_entry(&profile.creator, buyer);
         let is_approved: bool = env.storage().persistent().get(&entry_key).unwrap_or(false);
         if !is_approved {
-            return Err(ContractError::NotWhitelisted);
+            return Err(WhitelistError::NotWhitelisted);
         }
         return Ok(());
     }
@@ -1245,7 +1282,7 @@ fn assert_whitelist_allows_buy(
             return Ok(());
         }
     }
-    Err(ContractError::WhitelistOnly)
+    Err(WhitelistError::WhitelistOnly)
 }
 
 /// Reads a creator profile from storage, returning `None` for unregistered creators.
@@ -1884,33 +1921,6 @@ pub fn read_total_staked(env: &Env, creator: &Address) -> u32 {
         .unwrap_or(0)
 }
 
-/// Routes a share of a protocol fee collection into the creator's staking rewards pool.
-///
-/// This is additive bookkeeping on top of the existing treasury/protocol-fee-recipient
-/// split — it does not reduce what those balances receive, so existing fee-accounting
-/// invariants are unaffected. [`CreatorKeysContract::claim_stake_reward`] pays stakers
-/// out of this dedicated pool.
-fn credit_staking_rewards_pool(
-    env: &Env,
-    creator: &Address,
-    protocol_fee: i128,
-) -> Result<(), ContractError> {
-    if protocol_fee <= 0 {
-        return Ok(());
-    }
-    let share = fee::apply_percentage_fee(protocol_fee, STAKING_REWARD_SHARE_BPS)
-        .ok_or(ContractError::Overflow)?;
-    if share <= 0 {
-        return Ok(());
-    }
-    let key = constants::storage::staking_rewards_pool(creator);
-    let updated = read_staking_rewards_pool(env, creator)
-        .checked_add(share)
-        .ok_or(ContractError::Overflow)?;
-    env.storage().persistent().set(&key, &updated);
-    Ok(())
-}
-
 /// Archive retention configuration module with canonical defaults.
 pub mod retention {
     use super::PartitionStrategy;
@@ -2304,7 +2314,10 @@ fn compute_claimable_dividend(env: &Env, creator: &Address, holder: &Address) ->
 /// `CREATOR_TTL_LEDGERS` on fresh networks; forcing the full window at write
 /// time keeps the entry's real TTL aligned with the live-until the contract
 /// tracks for the TTL-extension event.
-fn extend_key_ttl_to_full_window(env: &Env, key: &DataKey) {
+fn extend_key_ttl_to_full_window<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(
+    env: &Env,
+    key: &K,
+) {
     env.storage()
         .persistent()
         .extend_ttl(key, CREATOR_TTL_LEDGERS, CREATOR_TTL_LEDGERS);
@@ -5326,85 +5339,6 @@ impl CreatorKeysContract {
         Ok(result)
     }
 
-    /// Claims the staking reward for `stake_id` once its lock period has elapsed.
-    ///
-    /// Pays out the position's pro-rata share of the pool, releases the keys to
-    /// the holder's liquid balance and removes the position.
-    pub fn claim_stake_reward(
-        env: Env,
-        creator: Address,
-        holder: Address,
-        stake_id: u32,
-    ) -> Result<StakeRewardClaim, StakingError> {
-        holder.require_auth();
-        assert_not_paused(&env).map_err(map_staking_error)?;
-
-        let position_key = constants::storage::staking_position(&creator, &holder, stake_id);
-        let position: StakePosition = env
-            .storage()
-            .persistent()
-            .get(&position_key)
-            .ok_or(StakingError::PositionNotFound)?;
-
-        if env.ledger().sequence() < position.unlock_ledger {
-            return Err(StakingError::PositionLocked);
-        }
-
-        let pool_key = constants::storage::staking_rewards_pool(&creator);
-        let mut state: StakingRewardsState =
-            env.storage()
-                .persistent()
-                .get(&pool_key)
-                .unwrap_or(StakingRewardsState {
-                    pool: 0,
-                    total_staked: 0,
-                });
-
-        let reward = if state.total_staked > 0 {
-            (i128::from(position.amount) * state.pool) / i128::from(state.total_staked)
-        } else {
-            0
-        };
-        state.pool = state
-            .pool
-            .checked_sub(reward)
-            .ok_or(StakingError::Overflow)?;
-        state.total_staked = state
-            .total_staked
-            .checked_sub(position.amount)
-            .ok_or(StakingError::Overflow)?;
-        if state.total_staked == 0 && state.pool == 0 {
-            env.storage().persistent().remove(&pool_key);
-        } else {
-            env.storage().persistent().set(&pool_key, &state);
-            extend_key_ttl_to_full_window(&env, &pool_key);
-        }
-
-        // Release the keys back into the holder's liquid balance.
-        env.storage().persistent().remove(&position_key);
-        sub_staked_balance(&env, &creator, &holder, position.amount);
-
-        let result = StakeRewardClaim {
-            stake_id,
-            amount: position.amount,
-            reward,
-        };
-        env.events().publish(
-            events::stake_reward_claimed_topics(&creator, &holder, stake_id),
-            events::StakeRewardClaimedEvent {
-                creator_id: creator,
-                holder,
-                stake_id,
-                amount: result.amount,
-                reward: result.reward,
-                unlock_ledger: position.unlock_ledger,
-                ledger: env.ledger().sequence(),
-            },
-        );
-
-        Ok(result)
-    }
-
     /// Read-only view: returns the stored staking position for
     /// `(creator, holder, stake_id)`, or `None` if no such position exists.
     pub fn get_staking_position(
@@ -5418,29 +5352,6 @@ impl CreatorKeysContract {
             .get(&constants::storage::staking_position(
                 &creator, &holder, stake_id,
             ))
-    }
-
-    /// Read-only view: returns the current staking rewards pool for `creator`.
-    pub fn get_staking_rewards_pool(env: Env, creator: Address) -> i128 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, StakingRewardsState>(&constants::storage::staking_rewards_pool(
-                &creator,
-            ))
-            .map(|state| state.pool)
-            .unwrap_or(0)
-    }
-
-    /// Read-only view: returns the total number of keys currently staked for
-    /// `creator` across all holders.
-    pub fn get_total_staked(env: Env, creator: Address) -> u32 {
-        env.storage()
-            .persistent()
-            .get::<DataKey, StakingRewardsState>(&constants::storage::staking_rewards_pool(
-                &creator,
-            ))
-            .map(|state| state.total_staked)
-            .unwrap_or(0)
     }
 
     // =========================================================================
@@ -5826,7 +5737,7 @@ impl CreatorKeysContract {
         env: Env,
         creator: Address,
         beneficiary: Address,
-    ) -> Result<u32, ContractError> {
+    ) -> Result<u32, VestingError> {
         beneficiary.require_auth();
 
         let vesting_key = constants::storage::vesting_schedule(&creator, &beneficiary);
@@ -5834,15 +5745,15 @@ impl CreatorKeysContract {
             .storage()
             .persistent()
             .get(&vesting_key)
-            .ok_or(ContractError::VestingNotFound)?;
+            .ok_or(VestingError::VestingNotFound)?;
 
         if schedule.beneficiary != beneficiary {
-            return Err(ContractError::Unauthorized);
+            return Err(VestingError::Unauthorized);
         }
 
         let current_ledger = env.ledger().sequence();
         if current_ledger < schedule.start_ledger {
-            return Err(ContractError::AllocationLocked);
+            return Err(VestingError::AllocationLocked);
         }
 
         let elapsed = current_ledger.saturating_sub(schedule.start_ledger);
@@ -5852,23 +5763,23 @@ impl CreatorKeysContract {
         } else {
             (schedule.total_keys as u64)
                 .checked_mul(elapsed as u64)
-                .ok_or(ContractError::Overflow)?
+                .ok_or(VestingError::Overflow)?
                 .checked_div(schedule.vesting_period_ledgers as u64)
-                .ok_or(ContractError::Overflow)? as u32
+                .ok_or(VestingError::Overflow)? as u32
         };
 
         let claimable = vested_keys
             .checked_sub(schedule.claimed_keys)
-            .ok_or(ContractError::AlreadyClaimed)?;
+            .ok_or(VestingError::AlreadyClaimed)?;
 
         if claimable == 0 {
-            return Err(ContractError::AlreadyClaimed);
+            return Err(VestingError::AlreadyClaimed);
         }
 
         schedule.claimed_keys = schedule
             .claimed_keys
             .checked_add(claimable)
-            .ok_or(ContractError::Overflow)?;
+            .ok_or(VestingError::Overflow)?;
         env.storage().persistent().set(&vesting_key, &schedule);
 
         // Credit keys to beneficiary balance
@@ -5876,16 +5787,17 @@ impl CreatorKeysContract {
         let current_balance: u32 = env.storage().persistent().get(&balance_key).unwrap_or(0);
         let new_balance = current_balance
             .checked_add(claimable)
-            .ok_or(ContractError::Overflow)?;
+            .ok_or(VestingError::Overflow)?;
         env.storage().persistent().set(&balance_key, &new_balance);
 
         // Update holder count if first keys
         if current_balance == 0 {
-            let mut profile = read_registered_creator_profile(&env, &creator)?;
+            let mut profile = read_registered_creator_profile(&env, &creator)
+                .map_err(|_| VestingError::Overflow)?;
             profile.holder_count = profile
                 .holder_count
                 .checked_add(1)
-                .ok_or(ContractError::Overflow)?;
+                .ok_or(VestingError::Overflow)?;
             let profile_key = constants::storage::creator(&creator);
             env.storage().persistent().set(&profile_key, &profile);
         }
@@ -6106,7 +6018,7 @@ impl CreatorKeysContract {
         // 48 hours = 172,800 seconds / 5 seconds per ledger = 34,560 ledgers
         const TIMELOCK_DELAY_LEDGERS: u32 = 34_560;
 
-        let next_id_key = DataKey::TimelockNextId;
+        let next_id_key = GovernanceKey::TimelockNextId;
         let proposal_id: u32 = env.storage().persistent().get(&next_id_key).unwrap_or(1u32);
 
         let current_ledger = env.ledger().sequence();
@@ -6126,7 +6038,7 @@ impl CreatorKeysContract {
 
         env.storage()
             .persistent()
-            .set(&DataKey::TimelockProposal(proposal_id), &proposal);
+            .set(&GovernanceKey::TimelockProposal(proposal_id), &proposal);
 
         let next_id = proposal_id.checked_add(1).ok_or(ContractError::Overflow)?;
         env.storage().persistent().set(&next_id_key, &next_id);
@@ -6159,7 +6071,7 @@ impl CreatorKeysContract {
         let mut proposal: TimelockProposal = env
             .storage()
             .persistent()
-            .get(&DataKey::TimelockProposal(proposal_id))
+            .get(&GovernanceKey::TimelockProposal(proposal_id))
             .ok_or(ContractError::NotRegistered)?;
 
         if proposal.executed || proposal.cancelled {
@@ -6174,7 +6086,7 @@ impl CreatorKeysContract {
         proposal.executed = true;
         env.storage()
             .persistent()
-            .set(&DataKey::TimelockProposal(proposal_id), &proposal);
+            .set(&GovernanceKey::TimelockProposal(proposal_id), &proposal);
 
         env.events().publish(
             (events::config_change_executed_topics(),),
@@ -6201,7 +6113,7 @@ impl CreatorKeysContract {
         let mut proposal: TimelockProposal = env
             .storage()
             .persistent()
-            .get(&DataKey::TimelockProposal(proposal_id))
+            .get(&GovernanceKey::TimelockProposal(proposal_id))
             .ok_or(ContractError::NotRegistered)?;
 
         if proposal.executed || proposal.cancelled {
@@ -6211,7 +6123,7 @@ impl CreatorKeysContract {
         proposal.cancelled = true;
         env.storage()
             .persistent()
-            .set(&DataKey::TimelockProposal(proposal_id), &proposal);
+            .set(&GovernanceKey::TimelockProposal(proposal_id), &proposal);
 
         env.events().publish(
             (events::config_change_cancelled_topics(),),
@@ -6228,7 +6140,7 @@ impl CreatorKeysContract {
     pub fn get_timelock_proposal(env: Env, proposal_id: u32) -> Option<TimelockProposal> {
         env.storage()
             .persistent()
-            .get(&DataKey::TimelockProposal(proposal_id))
+            .get(&GovernanceKey::TimelockProposal(proposal_id))
     }
 
     // =========================================================================
@@ -6263,11 +6175,11 @@ impl CreatorKeysContract {
         }
 
         // Check for existing snapshot; if none, capture current balance as snapshot
-        let snapshot_key = DataKey::VoteSnapshot(creator_id.clone(), poll_id, voter.clone());
+        let snapshot_key = GovernanceKey::VoteSnapshot(creator_id.clone(), poll_id, voter.clone());
         let weight: u32 = if let Some(snap) = env
             .storage()
             .persistent()
-            .get::<DataKey, u32>(&snapshot_key)
+            .get::<GovernanceKey, u32>(&snapshot_key)
         {
             snap
         } else {
@@ -6348,7 +6260,7 @@ impl CreatorKeysContract {
     ) -> Option<u32> {
         env.storage()
             .persistent()
-            .get(&DataKey::VoteSnapshot(creator_id, poll_id, voter))
+            .get(&GovernanceKey::VoteSnapshot(creator_id, poll_id, voter))
     }
 
     // =========================================================================
@@ -6521,81 +6433,80 @@ impl CreatorKeysContract {
     ///
     /// # Errors
     ///
-    /// - [`FeatureError::NoStakeFound`] if the caller has no active stake for `creator`
-    /// - [`FeatureError::StakeLockActive`] if the current ledger is before the unlock ledger
-    /// - [`FeatureError::ProtocolPaused`] if the contract is paused
+    /// - [`StakingError::PositionNotFound`] if no position exists for `(creator, holder, stake_id)`
+    /// - [`StakingError::PositionLocked`] if the current ledger is before the position's unlock ledger
+    /// - [`StakingError::ProtocolPaused`] if the contract is paused
     pub fn claim_stake_reward(
         env: Env,
         creator: Address,
         holder: Address,
-    ) -> Result<i128, FeatureError> {
+        stake_id: u32,
+    ) -> Result<StakeRewardClaim, StakingError> {
         holder.require_auth();
-        assert_not_paused(&env).map_err(|_| FeatureError::ProtocolPaused)?;
+        assert_not_paused(&env).map_err(map_staking_error)?;
 
-        let staked_balance_key = constants::storage::staked_balance(&creator, &holder);
-        let staked_quantity: u32 = env
+        let position_key = constants::storage::staking_position(&creator, &holder, stake_id);
+        let position: StakePosition = env
             .storage()
             .persistent()
-            .get(&staked_balance_key)
-            .unwrap_or(0);
-        if staked_quantity == 0 {
-            return Err(FeatureError::NoStakeFound);
+            .get(&position_key)
+            .ok_or(StakingError::PositionNotFound)?;
+
+        if env.ledger().sequence() < position.unlock_ledger {
+            return Err(StakingError::PositionLocked);
         }
 
-        let unlock_key = constants::storage::stake_unlock_ledger(&creator, &holder);
-        let unlock_ledger: u32 = env
-            .storage()
-            .persistent()
-            .get(&unlock_key)
-            .ok_or(FeatureError::NoStakeFound)?;
-        if env.ledger().sequence() < unlock_ledger {
-            return Err(FeatureError::StakeLockActive);
-        }
-
-        let total_staked = read_total_staked(&env, &creator);
-        let pool_balance = read_staking_rewards_pool(&env, &creator);
-        let reward = if total_staked == 0 || pool_balance <= 0 {
-            0
-        } else {
-            let raw_share = pool_balance
-                .checked_mul(i128::from(staked_quantity))
-                .ok_or(FeatureError::Overflow)?
-                / i128::from(total_staked);
-            raw_share.min(pool_balance)
-        };
-
-        // Unlock: clear the stake and its lock record, mirroring `unstake_keys`.
-        env.storage().persistent().remove(&staked_balance_key);
-        env.storage().persistent().remove(&unlock_key);
-
-        let total_staked_key = constants::storage::total_staked(&creator);
-        let new_total_staked = total_staked.saturating_sub(staked_quantity);
-        if new_total_staked == 0 {
-            env.storage().persistent().remove(&total_staked_key);
-        } else {
+        let pool_key = constants::storage::staking_rewards_pool(&creator);
+        let mut state: StakingRewardsState =
             env.storage()
                 .persistent()
-                .set(&total_staked_key, &new_total_staked);
+                .get(&pool_key)
+                .unwrap_or(StakingRewardsState {
+                    pool: 0,
+                    total_staked: 0,
+                });
+
+        let reward = if state.total_staked == 0 || state.pool <= 0 {
+            0
+        } else {
+            let raw_share =
+                (i128::from(position.amount) * state.pool) / i128::from(state.total_staked);
+            raw_share.min(state.pool)
+        };
+
+        // Remove the position and release the keys back into liquid balance.
+        env.storage().persistent().remove(&position_key);
+        sub_staked_balance(&env, &creator, &holder, position.amount);
+
+        // Update pool accounting.
+        state.pool = state.pool.saturating_sub(reward);
+        state.total_staked = state.total_staked.saturating_sub(position.amount);
+        if state.total_staked == 0 && state.pool == 0 {
+            env.storage().persistent().remove(&pool_key);
+        } else {
+            env.storage().persistent().set(&pool_key, &state);
+            extend_key_ttl_to_full_window(&env, &pool_key);
         }
 
-        if reward > 0 {
-            let pool_key = constants::storage::staking_rewards_pool(&creator);
-            let remaining_pool = pool_balance.saturating_sub(reward);
-            env.storage().persistent().set(&pool_key, &remaining_pool);
-        }
-
+        let result = StakeRewardClaim {
+            stake_id,
+            amount: position.amount,
+            reward,
+        };
         env.events().publish(
-            events::stake_reward_claimed_topics(&creator, &holder),
+            events::stake_reward_claimed_topics(&creator, &holder, stake_id),
             events::StakeRewardClaimedEvent {
-                wallet: holder,
-                key_id: creator,
-                quantity_unlocked: staked_quantity,
-                reward_amount: reward,
+                creator_id: creator,
+                holder,
+                stake_id,
+                amount: position.amount,
+                reward,
+                unlock_ledger: position.unlock_ledger,
                 ledger: env.ledger().sequence(),
             },
         );
 
-        Ok(reward)
+        Ok(result)
     }
 
     /// Read-only view: returns the total keys currently staked across all
