@@ -386,7 +386,10 @@ pub struct CoCreatorSetEvent {
     pub split_bps: u32,
 }
 
-pub fn co_creator_set_topics(creator_id: &Address, co_creator: &Address) -> (Symbol, Address, Address) {
+pub fn co_creator_set_topics(
+    creator_id: &Address,
+    co_creator: &Address,
+) -> (Symbol, Address, Address) {
     (
         CO_CREATOR_SET_EVENT_NAME,
         creator_id.clone(),
@@ -1478,7 +1481,6 @@ pub fn stake_reward_claimed_topics(
     )
 }
 
-
 // ============================================================================
 // Launch Penalty (#798)
 // ============================================================================
@@ -1507,7 +1509,11 @@ pub fn launch_penalty_applied_topics(
     creator: &Address,
     seller: &Address,
 ) -> (Symbol, Address, Address) {
-    (LAUNCH_PENALTY_APPLIED_EVENT_NAME, creator.clone(), seller.clone())
+    (
+        LAUNCH_PENALTY_APPLIED_EVENT_NAME,
+        creator.clone(),
+        seller.clone(),
+    )
 }
 
 /// Event name for set_launch_penalty.
