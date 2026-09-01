@@ -70,7 +70,6 @@ fn test_sell_within_lockup_is_rejected_and_emits_event() {
         Err(Err(soroban_sdk::InvokeError::Contract(
             ContractError::LockupPeriodActive as u32
         ))),
-        Err(Ok(ContractError::AllocationLocked)),
         "a sell inside the 24h lockup must be rejected"
     );
 

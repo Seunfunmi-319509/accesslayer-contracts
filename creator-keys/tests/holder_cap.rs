@@ -60,7 +60,6 @@ fn test_buy_pushing_holder_above_cap_panics() {
         Err(Err(soroban_sdk::InvokeError::Contract(
             ContractError::MaxHoldingExceeded as u32
         ))),
-        Err(Ok(ContractError::WalletCapExceeded)),
         "a buy past 10% of supply must be rejected"
     );
     assert_eq!(client.get_key_balance(&creator, &buyer), 2);
