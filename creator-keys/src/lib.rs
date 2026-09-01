@@ -2740,7 +2740,7 @@ impl CreatorKeysContract {
                 .storage()
                 .persistent()
                 .get(&constants::storage::CIRCUIT_BREAKER_THRESHOLD)
-                .unwrap_or(0);
+                .unwrap_or(30);
 
             if pre_price > 0 && post_price > pre_price && threshold_pct > 0 {
                 let price_change = (post_price - pre_price) as u128;

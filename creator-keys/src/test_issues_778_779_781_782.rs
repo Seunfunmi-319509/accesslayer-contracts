@@ -17,7 +17,8 @@ fn setup_test() -> (Env, CreatorKeysContractClient<'static>, Address, Address) {
     let client = CreatorKeysContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
-    client.set_key_price(&admin, &1000i128);
+    client.set_protocol_admin(&admin, &admin);
+    client.set_key_price(&admin, &100i128);
     client.set_fee_config(&admin, &9000u32, &1000u32);
 
     (env, client, admin.clone(), admin)
