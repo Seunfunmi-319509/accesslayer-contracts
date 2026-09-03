@@ -5952,7 +5952,7 @@ impl CreatorKeysContract {
             .ok_or(ContractError::Overflow)?;
 
         if current_balance > 0 && new_balance == 0 {
-            profile.holder_count = profile.holder_count.checked_sub(1).unwrap_or(0);
+            profile.holder_count = profile.holder_count.saturating_sub(1);
         }
 
         profile.supply = new_supply;

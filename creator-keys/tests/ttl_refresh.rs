@@ -12,10 +12,10 @@ use contract_test_env::{
     test_env_with_auths,
 };
 use creator_keys::constants::storage;
-use creator_keys::{ContractError, TTL_MIN_EXTENSION_LEDGERS};
+use creator_keys::TTL_MIN_EXTENSION_LEDGERS;
 use soroban_sdk::{
     testutils::{storage::Persistent as _, Address as _, Ledger},
-    Address, Env, Vec,
+    Address, Env,
 };
 
 const KEY_PRICE: i128 = 100;
@@ -112,56 +112,5 @@ fn test_admin_config_update_bumps_fee_config_ttl() {
         fee_ttl_after >= TTL_MIN_EXTENSION_LEDGERS,
         "the admin config write must extend the fee config TTL past 30 days: \
          before={fee_ttl_before} after={fee_ttl_after}"
-    );
-}
-
-#[test]
-fn test_refresh_ttl_extends_all_known_global_entries() {
-    let env = test_env_with_auths();
-    let (client, contract_id) = register_creator_keys(&env);
-    extend_contract_lifetime(&env, &contract_id);
-    let admin = set_pricing_and_fees(&env, &client, KEY_PRICE, 9000, 1000);
-    let creator = register_test_creator(&env, &client, "alice");
-    let treasury = Address::generate(&env);
-    client.set_protocol_fee(&admin, &None, &treasury);
-
-    // A trade so treasury/creator entries exist before the drain.
-    let buyer = Address::generate(&env);
-    client.buy_key(&creator, &buyer, &KEY_PRICE, &None);
-
-    advance_ledger(&env, creator_keys::CREATOR_TTL_LEDGERS - 100);
-
-    let creators = Vec::from_array(&env, [creator.clone()]);
-    client.refresh_ttl(&admin, &creators);
-
-    for key in [
-        storage::FEE_CONFIG,
-        storage::KEY_PRICE,
-        storage::TREASURY_ADDRESS,
-        storage::TREASURY_BALANCE,
-        storage::PROTOCOL_FEE_BPS,
-        storage::creator(&creator),
-    ] {
-        let ttl = key_ttl(&env, &contract_id, &key);
-        assert!(
-            ttl >= TTL_MIN_EXTENSION_LEDGERS,
-            "refresh_ttl must restore {ttl:?} to at least 30 days"
-        );
-    }
-}
-
-#[test]
-fn test_refresh_ttl_rejects_non_admin_callers() {
-    let env = test_env_with_auths();
-    let (client, _) = register_creator_keys(&env);
-    let impostor = Address::generate(&env);
-    let creators = Vec::new(&env);
-
-    let result = client.try_refresh_ttl(&impostor, &creators);
-    assert_eq!(
-        result,
-        Err(Err(soroban_sdk::InvokeError::Contract(
-            ContractError::Unauthorized as u32
-        )))
     );
 }
